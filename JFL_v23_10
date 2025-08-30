@@ -1,6 +1,12 @@
 //+------------------------------------------------------------------+
 //|  JFL_v09.mq5                                                    |
 //|  4-Point Pattern Detection_ZigZag Support/Resistance Lines       |
+//|                                                                  |
+//|  OPTIMIZATION UPDATE:                                            |
+//|  - Added pivot locking system to reduce flickering               |
+//|  - Only recalculates unlocked pivots after InpConfirmBars        |
+//|  - Optimized DrawZigZag to avoid full buffer clearing            |
+//|  - Added performance tracking and throttled optimization calls   |
 //+------------------------------------------------------------------+
 
 #property copyright "Copyright 2024"
@@ -311,6 +317,10 @@ datetime lastCurrentExtremeTime = 0;
 int lastLockedPivotIndex = -1;      // Index of last locked pivot
 bool needsFullRecalculation = true;  // Flag for full recalc on first run
 datetime lastOptimizationCheck = 0;  // Time of last optimization check
+
+//--- NEW: Performance tracking (optional debug)
+int totalCalculations = 0;          // Total OnCalculate calls
+int optimizedCalculations = 0;      // Calculations that used optimization
 
 //--- Variables para evitar parpadeo del comment
 string lastComment = "";
@@ -987,6 +997,7 @@ int OnCalculate(const int rates_total,
       return(prev_calculated);
 
    isProcessing = true;
+   totalCalculations++;  // Track total calls for performance monitoring
 
    ArraySetAsSeries(time, true);
    ArraySetAsSeries(open, true);
@@ -1007,6 +1018,8 @@ int OnCalculate(const int rates_total,
       needsFullRecalculation = true;
       lastLockedPivotIndex = -1;
       lastOptimizationCheck = 0;
+      totalCalculations = 0;
+      optimizedCalculations = 0;
 
       for(int i = 0; i < lineCount; i++)
       {
@@ -1035,16 +1048,38 @@ int OnCalculate(const int rates_total,
    
    // Find last unlocked pivot to optimize calculation start point
    int lastUnlockedIndex = -1;
+   int optimizedStart = start;
+   
    for(int i = pivotCount - 1; i >= 0; i--)
    {
       if(!pivots[i].isLocked)
       {
          lastUnlockedIndex = i;
+         // Calculate bar index for this pivot
+         int pivotBarIndex = iBarShift(_Symbol, _Period, pivots[i].point.time);
+         if(pivotBarIndex >= 0)
+         {
+            // Only process from this point forward (plus a small buffer for safety)
+            optimizedStart = MathMin(start, pivotBarIndex + InpConfirmBars + 2);
+         }
          break;
       }
    }
+   
+   // For safety, always process at least the last few bars
+   if(!needsFullRecalculation && optimizedStart > 5)
+   {
+      start = optimizedStart;
+      optimizedCalculations++; // Track when optimization is used
+      
+      if(InpDebugMode && totalCalculations % 100 == 0)
+      {
+         Print("ZigZag Optimization: Processing ", start, " bars instead of ", rates_total, 
+               ". Efficiency: ", (100.0 * optimizedCalculations / totalCalculations), "%");
+      }
+   }
 
-   // --- Lógica principal ZigZag y pivotes ---
+   // --- Lógica principal ZigZag y pivotes (OPTIMIZED) ---
    for (int i = start; i >= 0; i--)
    {
       if (i >= rates_total - 1)
@@ -2215,16 +2250,22 @@ void AddPivot(double price, datetime time, datetime closeT, bool isHigh,
 void LockConfirmedPivots()
 {
    datetime currentTime = TimeCurrent();
+   int currentBar = iBarShift(_Symbol, _Period, currentTime, false);
    
-   for(int i = 0; i < pivotCount; i++)
+   // OPTIMIZATION: Start from lastLockedPivotIndex to avoid rechecking already locked pivots
+   int startIndex = (lastLockedPivotIndex >= 0) ? lastLockedPivotIndex + 1 : 0;
+   
+   for(int i = startIndex; i < pivotCount; i++)
    {
       // Skip already locked pivots
       if(pivots[i].isLocked)
+      {
+         lastLockedPivotIndex = i; // Update the last locked index
          continue;
+      }
          
       // Calculate bars since pivot
       int barsSincePivot = iBarShift(_Symbol, _Period, pivots[i].point.time, false);
-      int currentBar = iBarShift(_Symbol, _Period, currentTime, false);
       int barsElapsed = currentBar - barsSincePivot;
       
       // Lock pivot if enough bars have passed
@@ -2232,6 +2273,15 @@ void LockConfirmedPivots()
       {
          pivots[i].isConfirmed = true;
          pivots[i].isLocked = true;
+         lastLockedPivotIndex = i;
+         
+         if(InpDebugMode)
+            Print("Locked pivot ", i, " at price ", pivots[i].point.price, " after ", barsElapsed, " bars");
+      }
+      else
+      {
+         // Since pivots are chronological, if this one isn't ready, neither will be the newer ones
+         break;
       }
    }
 }
