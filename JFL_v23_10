@@ -3984,18 +3984,8 @@ void DrawCurrentExtremeLinePrecise()
     if(ObjectFind(0, lineName) < 0) // La línea no existe
         needsUpdate = true;
         
-    // ✅ NUEVO: Verificar si currentExtremeTime cambió significativamente
-    static datetime lastProcessedExtremeTime = 0;
-    if(MathAbs(currentExtremeTime - lastProcessedExtremeTime) > PeriodSeconds(_Period))
-        needsUpdate = true;
-    
-    // ✅ NUEVO: Forzar actualización cada cierto tiempo para evitar que se quede pegada
-    static datetime lastForceUpdate = 0;
-    if(TimeCurrent() - lastForceUpdate > 30) // Cada 30 segundos
-    {
-        needsUpdate = true;
-        lastForceUpdate = TimeCurrent();
-    }
+    // REMOVED: No longer checking currentExtremeTime changes or forcing updates
+    // These checks caused excessive redraws and visual flickering
     
     if(!needsUpdate)
         return;
@@ -4003,7 +3993,7 @@ void DrawCurrentExtremeLinePrecise()
     // Actualizar variables de control
     lastProcessedExtreme = currentExtreme;
     lastProcessedPivotCount = pivotCount;
-    lastProcessedExtremeTime = currentExtremeTime; // ✅ NUEVO
+    // REMOVED: lastProcessedExtremeTime no longer needed
 
     datetime intersectionTime = 0;
     double y = currentExtreme;
@@ -4052,34 +4042,34 @@ void DrawCurrentExtremeLinePrecise()
     // Guardar el tiempo de intersección para el sistema de alertas
     lastIntersectionTime = intersectionTime;
 
-    // ✅ CREAR O ACTUALIZAR la línea horizontal siempre
+    // ✅ CREAR O ACTUALIZAR la línea horizontal con extensión hacia la derecha
     if(ObjectFind(0, lineName) < 0)
     {
-        // Crear nueva línea
+        // Crear nueva línea con punto final fijo y extensión infinita hacia la derecha
         ObjectCreate(0, lineName, OBJ_TREND, 0,
                      intersectionTime, y,
-                     currentExtremeTime, y);
+                     intersectionTime + PeriodSeconds(_Period) * 100, y); // Punto final fijo
         ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 1);
         ObjectSetInteger(0, lineName, OBJPROP_RAY_LEFT, false);
-        ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+        ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, true);  // ← OPTIMIZACIÓN CLAVE: Extender hacia la derecha
         ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
         ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
         ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrAqua);
     }
     else
     {
-        // ✅ ACTUALIZAR posición siempre (no solo mover)
+        // OPTIMIZADO: Solo actualizar precio y tiempo de inicio - NO el punto final
         ObjectSetDouble(0, lineName, OBJPROP_PRICE, 0, y);
-        ObjectSetDouble(0, lineName, OBJPROP_PRICE, 1, y);
+        ObjectSetDouble(0, lineName, OBJPROP_PRICE, 1, y);  
         ObjectSetInteger(0, lineName, OBJPROP_TIME, 0, intersectionTime);
-        ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, currentExtremeTime);
+        // REMOVED: ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, currentExtremeTime); // No necesario con RAY_RIGHT
         
-        // ✅ ASEGURAR que el color sea correcto
+        // Asegurar que el color sea correcto
         ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrAqua);
     }
     
-    // ✅ NUEVO: Log para debug
+    // Debug log for optimization monitoring
     if(InpDebugMode)
     {
         static datetime lastDebugTime = 0;
@@ -4087,7 +4077,7 @@ void DrawCurrentExtremeLinePrecise()
         {
             Print("Current Extreme Line actualizada: Precio=", DoubleToString(y, _Digits), 
                   " Desde=", TimeToString(intersectionTime), 
-                  " Hasta=", TimeToString(currentExtremeTime));
+                  " ExtensionInfinita=RAY_RIGHT"); // Línea ahora se extiende infinitamente
             lastDebugTime = TimeCurrent();
         }
     }
