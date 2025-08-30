@@ -154,6 +154,7 @@ struct SPivot
    bool isHigh;
    bool isHigher;
    bool isConfirmed;
+   bool isLocked;              // NEW: Locked pivots don't get recalculated
    string openLineName;
    string closeLineName;
    bool openLineCreated;
@@ -175,6 +176,7 @@ struct SPivot
       isHigh = other.isHigh;
       isHigher = other.isHigher;
       isConfirmed = other.isConfirmed;
+      isLocked = other.isLocked;
       openLineName = other.openLineName;
       closeLineName = other.closeLineName;
       openLineCreated = other.openLineCreated;
@@ -305,6 +307,11 @@ bool timerPending = false;
 double lastCurrentExtreme = 0;
 datetime lastCurrentExtremeTime = 0;
 
+//--- NEW: Optimization variables for locked pivots
+int lastLockedPivotIndex = -1;      // Index of last locked pivot
+bool needsFullRecalculation = true;  // Flag for full recalc on first run
+datetime lastOptimizationCheck = 0;  // Time of last optimization check
+
 //--- Variables para evitar parpadeo del comment
 string lastComment = "";
 datetime lastCommentUpdate = 0;
@@ -326,6 +333,7 @@ string panelPrefix = "ZZ_Panel_";
 datetime lastTouchCheck = 0;
 
 //--- Function declarations
+void LockConfirmedPivots();  // NEW: Optimization function
 void CreateSRLine(const SPivot &pivot, double price, bool isOpenLine, int pivotIdx, bool isPatternBased = false, double val_i4_price = 0, double val_i3_price = 0);
 bool Check4PointResistancePattern(int currentPivotIdx, S4PointPattern &pattern);
 bool Check4PointSupportPattern(int currentPivotIdx, S4PointPattern &pattern);
@@ -994,6 +1002,11 @@ int OnCalculate(const int rates_total,
       currentExtreme = 0.0;
       currentExtremeTime = 0;
       currentDirection = "up";
+      
+      // Reset optimization flags
+      needsFullRecalculation = true;
+      lastLockedPivotIndex = -1;
+      lastOptimizationCheck = 0;
 
       for(int i = 0; i < lineCount; i++)
       {
@@ -1010,6 +1023,25 @@ int OnCalculate(const int rates_total,
    {
       start = rates_total - prev_calculated;
       if(start > 2) start = 2;
+   }
+
+   // --- NEW: Lock confirmed pivots for optimization (throttled) ---
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastOptimizationCheck >= PeriodSeconds(_Period) || needsFullRecalculation)
+   {
+      LockConfirmedPivots();
+      lastOptimizationCheck = currentTime;
+   }
+   
+   // Find last unlocked pivot to optimize calculation start point
+   int lastUnlockedIndex = -1;
+   for(int i = pivotCount - 1; i >= 0; i--)
+   {
+      if(!pivots[i].isLocked)
+      {
+         lastUnlockedIndex = i;
+         break;
+      }
    }
 
    // --- Lógica principal ZigZag y pivotes ---
@@ -2080,6 +2112,8 @@ void AddPivot(double price, datetime time, datetime closeT, bool isHigh,
    newPivot.close = closePrice;
    newPivot.isHigh = isHigh;
    newPivot.isHigher = false;
+   newPivot.isConfirmed = false;  // Initialize as not confirmed
+   newPivot.isLocked = false;     // Initialize as not locked
    newPivot.openLineName = "";
    newPivot.closeLineName = "";
    newPivot.openLineCreated = false;
@@ -2175,14 +2209,41 @@ void AddPivot(double price, datetime time, datetime closeT, bool isHigh,
    }
 }
 
+//+------------------------------------------------------------------+
+//| Lock confirmed pivots to optimize recalculation                  |
+//+------------------------------------------------------------------+
+void LockConfirmedPivots()
+{
+   datetime currentTime = TimeCurrent();
+   
+   for(int i = 0; i < pivotCount; i++)
+   {
+      // Skip already locked pivots
+      if(pivots[i].isLocked)
+         continue;
+         
+      // Calculate bars since pivot
+      int barsSincePivot = iBarShift(_Symbol, _Period, pivots[i].point.time, false);
+      int currentBar = iBarShift(_Symbol, _Period, currentTime, false);
+      int barsElapsed = currentBar - barsSincePivot;
+      
+      // Lock pivot if enough bars have passed
+      if(barsElapsed >= InpConfirmBars && barsElapsed >= 0)
+      {
+         pivots[i].isConfirmed = true;
+         pivots[i].isLocked = true;
+      }
+   }
+}
+
 
 //+------------------------------------------------------------------+
 //| Update pivot with new price                                      |
 //+------------------------------------------------------------------+
 void UpdatePivot(int index, double newPrice, datetime newTime)
 {
-   // Si el pivote ya está confirmado, no actualizar
-   if(pivots[index].isConfirmed)
+   // Si el pivote ya está confirmado o bloqueado, no actualizar
+   if(pivots[index].isConfirmed || pivots[index].isLocked)
       return;
 
    // Actualizar precio y tiempo del pivote
@@ -2205,33 +2266,93 @@ void UpdatePivot(int index, double newPrice, datetime newTime)
 //+------------------------------------------------------------------+
 void DrawZigZag(int rates_total)
 {
-   // Limpieza completa en cada llamada (menos eficiente pero más limpio)
-   for(int i = 0; i < rates_total; i++)
-   {
-      ZigZagHigh[i] = 0.0;
-      ZigZagLow[i] = 0.0;
-   }
-   
    if(!InpDisplayZigZag)
       return;
       
    if(pivotCount == 0 && currentExtreme == 0.0)
       return;
    
-   // Dibujar solo puntos de pivotes confirmados
-   for(int i = 0; i < pivotCount; i++)
+   // --- OPTIMIZED: Only clear buffers if full recalculation needed ---
+   static bool lastFullRecalc = false;
+   if(needsFullRecalculation || lastFullRecalc != needsFullRecalculation)
    {
-      int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
-      if(shift >= 0 && shift < rates_total)
+      // Full clear only when necessary
+      for(int i = 0; i < rates_total; i++)
       {
-         if(pivots[i].isHigh)
-            ZigZagHigh[shift] = pivots[i].point.price;
-         else
-            ZigZagLow[shift] = pivots[i].point.price;
+         ZigZagHigh[i] = 0.0;
+         ZigZagLow[i] = 0.0;
+      }
+      lastFullRecalc = needsFullRecalculation;
+      needsFullRecalculation = false;
+   }
+   else
+   {
+      // --- OPTIMIZED: Only clear areas that might have changed ---
+      
+      // Find the range to clear (from last unlocked pivot forward)
+      int clearStart = -1;
+      for(int i = pivotCount - 1; i >= 0; i--)
+      {
+         if(!pivots[i].isLocked)
+         {
+            int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+            if(clearStart == -1 || shift < clearStart)
+               clearStart = shift;
+         }
+      }
+      
+      // Also include current extreme area
+      if(currentExtreme != 0.0)
+      {
+         int currentShift = iBarShift(_Symbol, _Period, currentExtremeTime);
+         if(clearStart == -1 || currentShift < clearStart)
+            clearStart = currentShift;
+      }
+      
+      // Clear only the necessary range
+      if(clearStart >= 0)
+      {
+         for(int i = clearStart; i >= 0 && i < rates_total; i--)
+         {
+            ZigZagHigh[i] = 0.0;
+            ZigZagLow[i] = 0.0;
+         }
       }
    }
    
-   // Current extreme por separado
+   // --- Draw locked pivots (these don't change) ---
+   for(int i = 0; i < pivotCount; i++)
+   {
+      if(pivots[i].isLocked)
+      {
+         int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+         if(shift >= 0 && shift < rates_total)
+         {
+            if(pivots[i].isHigh)
+               ZigZagHigh[shift] = pivots[i].point.price;
+            else
+               ZigZagLow[shift] = pivots[i].point.price;
+         }
+      }
+   }
+   
+   // --- Draw unlocked pivots (may change) ---
+   for(int i = 0; i < pivotCount; i++)
+   {
+      if(!pivots[i].isLocked)
+      {
+         int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
+         if(shift >= 0 && shift < rates_total)
+         {
+            if(pivots[i].isHigh)
+               ZigZagHigh[shift] = pivots[i].point.price;
+            else
+               ZigZagLow[shift] = pivots[i].point.price;
+         }
+      }
+   }
+   
+   // Current extreme (always updated)
    if(currentExtreme != 0.0)
    {
       int currentShift = iBarShift(_Symbol, _Period, currentExtremeTime);
@@ -2994,6 +3115,19 @@ void CreateLineFromPivot(int pivotIdx)
 //+------------------------------------------------------------------+
 void CreateSRLine(const SPivot &pivot, double price, bool isOpenLine, int pivotIdx, bool isPatternBased = false, double val_i4_price = 0, double val_i3_price = 0)
 {
+   // OPTIMIZATION: Don't recreate lines for locked pivots unless it's a pattern-based line
+   if(pivotIdx >= 0 && pivotIdx < pivotCount && pivots[pivotIdx].isLocked && !isPatternBased)
+   {
+      // Check if line already exists for this locked pivot
+      for(int i = 0; i < lineCount; i++)
+      {
+         if(srLines[i].pivotIndex == pivotIdx && 
+            MathAbs(srLines[i].linePrice - price) < _Point)
+         {
+            return; // Line already exists, don't recreate
+         }
+      }
+   }
    
    if(price <= 0 || lineCount >= InpMaxTotalLines)
    {
