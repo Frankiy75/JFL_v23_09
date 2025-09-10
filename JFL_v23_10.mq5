@@ -339,6 +339,8 @@ double GetLastConfirmedHigh(int &highIndex);
 string GetZigZagDirection();
 double GetZigZagMinimum();
 double GetZigZagMaximum();
+bool ValidateCurrentExtreme();
+bool IsPivotConfirmed(double extremePrice, datetime extremeTime, bool isHigh);
 
 //+------------------------------------------------------------------+
 //| NUEVA: Escanear patrones sin destruir líneas existentes         |
@@ -1057,6 +1059,15 @@ int OnCalculate(const int rates_total,
       }
    }
 
+   // --- Validate current extreme before processing ---
+   if(!ValidateCurrentExtreme())
+   {
+      // Reset invalid extreme
+      currentExtreme = 0.0;
+      currentExtremeTime = 0;
+      currentDirection = "";
+   }
+
    // --- Lógica de líneas, patrones y actualización ---
    DrawZigZag(rates_total);
    
@@ -1064,14 +1075,20 @@ int OnCalculate(const int rates_total,
    static int lastValidationPivotCount = 0;
    
    bool needsValidation = false;
-   if(MathAbs(currentExtreme - lastValidationExtreme) > _Point * 2)
+   // Increase tolerance to reduce unnecessary validations
+   if(MathAbs(currentExtreme - lastValidationExtreme) > _Point * 10)
        needsValidation = true;
    if(pivotCount != lastValidationPivotCount)
        needsValidation = true;
    
    if(needsValidation)
    {
-       CleanupLinesByPrice();
+       // Only cleanup if there's a significant change
+       if(MathAbs(currentExtreme - lastValidationExtreme) > _Point * 20 || 
+          pivotCount != lastValidationPivotCount)
+       {
+           CleanupLinesByPrice();
+       }
        lastValidationExtreme = currentExtreme;
        lastValidationPivotCount = pivotCount;
    }
@@ -2017,52 +2034,119 @@ bool ValidateSelectedTime()
 //+------------------------------------------------------------------+
 void Scan(double src, bool isHigh, datetime time)
 {
-   double openPrice = iOpen(_Symbol, _Period, iBarShift(_Symbol, _Period, time));
-   double closePrice = iClose(_Symbol, _Period, iBarShift(_Symbol, _Period, time));
+   int currentShift = iBarShift(_Symbol, _Period, time);
+   if(currentShift < 0) return;
    
-   // Añade esto en tu función Scan (reemplaza la parte de actualización del currentExtreme)
-
-
-
-   // 1. Primer extremo, inicializa normal
+   double openPrice = iOpen(_Symbol, _Period, currentShift);
+   double closePrice = iClose(_Symbol, _Period, currentShift);
+   
+   // 1. First extreme initialization
    if(currentExtreme == 0.0)
    {
       currentExtreme = src;
       currentExtremeTime = time;
       closeTime = time;
-      currentBarIndex = iBarShift(_Symbol, _Period, time);
+      currentBarIndex = currentShift;
       currentDirection = isHigh ? "up" : "down";
       return;
    }
    
-   // 2. Si sigue la misma dirección y sale un nuevo extremo mejor antes de la confirmación, ¡actualízalo!
+   // 2. Update current extreme if better value in same direction (before confirmation)
    if((isHigh && currentDirection == "up" && src > currentExtreme) ||
       (!isHigh && currentDirection == "down" && src < currentExtreme))
    {
       currentExtreme = src;
       currentExtremeTime = time;
       closeTime = time;
-      currentBarIndex = iBarShift(_Symbol, _Period, time);
-      // No confirms todavía, solo mueves el extremo provisional
+      currentBarIndex = currentShift;
       return;
    }
 
-   // 3. Si hay cambio de dirección, confirma el extremo anterior como pivote y empieza uno nuevo
+   // 3. Check for direction change with proper confirmation
    if((isHigh && currentDirection == "down") ||
       (!isHigh && currentDirection == "up"))
    {
-      AddPivot(currentExtreme, currentExtremeTime, closeTime, currentDirection == "up", 
-               iOpen(_Symbol, _Period, currentBarIndex),
-               iClose(_Symbol, _Period, currentBarIndex));
+      // Validate pivot confirmation with InpConfirmBars
+      if(IsPivotConfirmed(currentExtreme, currentExtremeTime, currentDirection == "up"))
+      {
+         AddPivot(currentExtreme, currentExtremeTime, closeTime, currentDirection == "up", 
+                  iOpen(_Symbol, _Period, currentBarIndex),
+                  iClose(_Symbol, _Period, currentBarIndex));
+      }
+      
+      // Start new extreme tracking
       currentExtreme = src;
       currentExtremeTime = time;
       closeTime = time;
-      currentBarIndex = iBarShift(_Symbol, _Period, time);
+      currentBarIndex = currentShift;
       currentDirection = isHigh ? "up" : "down";
       return;
    }
 }
 
+
+//+------------------------------------------------------------------+
+//| Validate that current extreme is reasonable and not outdated     |
+//+------------------------------------------------------------------+
+bool ValidateCurrentExtreme()
+{
+   if(currentExtreme == 0.0) return false;
+   
+   int currentShift = iBarShift(_Symbol, _Period, currentExtremeTime);
+   if(currentShift < 0 || currentShift > 100) return false; // Too old or invalid
+   
+   // Check if extreme still makes sense with recent price action
+   double recentHigh = iHigh(_Symbol, _Period, 0);
+   double recentLow = iLow(_Symbol, _Period, 0);
+   
+   if(currentDirection == "up")
+   {
+      // For upward direction, current extreme should be reasonable high
+      if(currentExtreme < recentLow || currentExtreme < iLow(_Symbol, _Period, currentShift))
+         return false;
+   }
+   else if(currentDirection == "down")
+   {
+      // For downward direction, current extreme should be reasonable low  
+      if(currentExtreme > recentHigh || currentExtreme > iHigh(_Symbol, _Period, currentShift))
+         return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Validate pivot confirmation with InpConfirmBars                   |
+//+------------------------------------------------------------------+
+bool IsPivotConfirmed(double extremePrice, datetime extremeTime, bool isHigh)
+{
+   if(InpConfirmBars <= 0) return true; // No confirmation required
+   
+   int extremeShift = iBarShift(_Symbol, _Period, extremeTime);
+   if(extremeShift < InpConfirmBars) return false; // Not enough bars for confirmation
+   
+   // Check confirmation bars after the extreme
+   for(int i = 1; i <= InpConfirmBars; i++)
+   {
+      int checkShift = extremeShift - i;
+      if(checkShift < 0) return false;
+      
+      if(isHigh)
+      {
+         // For high pivots, no subsequent bar should have a higher high
+         if(iHigh(_Symbol, _Period, checkShift) > extremePrice)
+            return false;
+      }
+      else
+      {
+         // For low pivots, no subsequent bar should have a lower low
+         if(iLow(_Symbol, _Period, checkShift) < extremePrice)
+            return false;
+      }
+   }
+   
+   return true;
+}
 
 //+------------------------------------------------------------------+
 //| Add pivot to array                                               |
@@ -2205,20 +2289,39 @@ void UpdatePivot(int index, double newPrice, datetime newTime)
 //+------------------------------------------------------------------+
 void DrawZigZag(int rates_total)
 {
-   // Limpieza completa en cada llamada (menos eficiente pero más limpio)
-   for(int i = 0; i < rates_total; i++)
-   {
-      ZigZagHigh[i] = 0.0;
-      ZigZagLow[i] = 0.0;
-   }
-   
    if(!InpDisplayZigZag)
+   {
+      // Clear buffers if ZigZag display is disabled
+      ArrayInitialize(ZigZagHigh, 0.0);
+      ArrayInitialize(ZigZagLow, 0.0);
       return;
+   }
       
    if(pivotCount == 0 && currentExtreme == 0.0)
       return;
    
-   // Dibujar solo puntos de pivotes confirmados
+   // Only clear buffers for confirmed pivots area to avoid unnecessary redraws
+   static int lastDrawnPivotCount = 0;
+   if(pivotCount != lastDrawnPivotCount)
+   {
+      // Clear only the range that needs updating
+      int startClear = 0;
+      if(lastDrawnPivotCount > 0 && pivotCount > lastDrawnPivotCount)
+      {
+         // Only clear from the last processed pivot
+         int lastShift = iBarShift(_Symbol, _Period, pivots[lastDrawnPivotCount-1].point.time);
+         startClear = MathMax(0, lastShift - 50); // Clear some extra bars for safety
+      }
+      
+      for(int i = startClear; i < rates_total; i++)
+      {
+         ZigZagHigh[i] = 0.0;
+         ZigZagLow[i] = 0.0;
+      }
+      lastDrawnPivotCount = pivotCount;
+   }
+   
+   // Draw confirmed pivots and interpolate lines between them
    for(int i = 0; i < pivotCount; i++)
    {
       int shift = iBarShift(_Symbol, _Period, pivots[i].point.time);
@@ -2229,9 +2332,19 @@ void DrawZigZag(int rates_total)
          else
             ZigZagLow[shift] = pivots[i].point.price;
       }
+      
+      // Interpolate line to next pivot
+      if(i < pivotCount - 1)
+      {
+         int nextShift = iBarShift(_Symbol, _Period, pivots[i+1].point.time);
+         if(shift >= 0 && nextShift >= 0 && shift != nextShift)
+         {
+            InterpolateLine(shift, nextShift, pivots[i], pivots[i+1]);
+         }
+      }
    }
    
-   // Current extreme por separado
+   // Draw current extreme and line from last pivot
    if(currentExtreme != 0.0)
    {
       int currentShift = iBarShift(_Symbol, _Period, currentExtremeTime);
@@ -2241,10 +2354,25 @@ void DrawZigZag(int rates_total)
             ZigZagHigh[currentShift] = currentExtreme;
          else
             ZigZagLow[currentShift] = currentExtreme;
+         
+         // Interpolate line from last confirmed pivot to current extreme
+         if(pivotCount > 0)
+         {
+            int lastPivotShift = iBarShift(_Symbol, _Period, pivots[pivotCount-1].point.time);
+            if(lastPivotShift >= 0 && lastPivotShift != currentShift)
+            {
+               SPivot currentExtremePivot;
+               currentExtremePivot.point.price = currentExtreme;
+               currentExtremePivot.point.time = currentExtremeTime;
+               currentExtremePivot.isHigh = (currentDirection == "up");
+               
+               InterpolateLine(lastPivotShift, currentShift, pivots[pivotCount-1], currentExtremePivot);
+            }
+         }
       }
    }
    
-   // Buffer de dirección ZigZag
+   // Update direction buffer
    if(currentDirection == "up")
       ZigZagDirectionBuffer[0] = 1.0;
    else if(currentDirection == "down")
@@ -2252,8 +2380,9 @@ void DrawZigZag(int rates_total)
    else
       ZigZagDirectionBuffer[0] = 0.0;
    
-   if(rates_total > 1)
-      ZigZagDirectionBuffer[1] = ZigZagDirectionBuffer[0];
+   // Propagate direction to recent bars
+   for(int i = 1; i < MathMin(10, rates_total); i++)
+      ZigZagDirectionBuffer[i] = ZigZagDirectionBuffer[0];
 }
 
 //+------------------------------------------------------------------+
@@ -2261,26 +2390,43 @@ void DrawZigZag(int rates_total)
 //+------------------------------------------------------------------+
 void InterpolateLine(int shift1, int shift2, const SPivot &pivot1, const SPivot &pivot2)
 {
+   // Ensure proper direction (shift1 should be older/higher index)
    if(shift1 <= shift2)
-      return;
+   {
+      // Swap if needed
+      int tempShift = shift1;
+      shift1 = shift2;
+      shift2 = tempShift;
+   }
       
    double price1 = pivot1.point.price;
    double price2 = pivot2.point.price;
    
-   // Calculate price step
+   if(shift1 == shift2) return; // Same point, no interpolation needed
+   
+   // Calculate price step for interpolation
    double priceStep = (price2 - price1) / (shift1 - shift2);
    
-   // Fill intermediate points
+   // Fill intermediate points with interpolated values
    for(int shift = shift2 + 1; shift < shift1; shift++)
    {
-      double interpolatedPrice = price2 + priceStep * (shift - shift2);
+      double interpolatedPrice = price1 + priceStep * (shift - shift2);
       
-      // Determine which buffer to use based on direction
-      if(pivot1.isHigh && !pivot2.isHigh) // High to Low
+      // Store interpolated price in both buffers to create continuous line
+      // The DRAW_ZIGZAG plot type will connect non-zero values
+      if(pivot1.isHigh && pivot2.isHigh)
       {
          ZigZagHigh[shift] = interpolatedPrice;
       }
-      else if(!pivot1.isHigh && pivot2.isHigh) // Low to High
+      else if(!pivot1.isHigh && !pivot2.isHigh)
+      {
+         ZigZagLow[shift] = interpolatedPrice;
+      }
+      else if(pivot1.isHigh && !pivot2.isHigh) // High to Low
+      {
+         ZigZagHigh[shift] = interpolatedPrice;
+      }
+      else // Low to High
       {
          ZigZagLow[shift] = interpolatedPrice;
       }
