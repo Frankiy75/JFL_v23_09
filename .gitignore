@@ -1,0 +1,21 @@
+# Ignore compiled files
+*.ex5
+*.ex4
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.log
+
+# Ignore IDE files
+.vscode/
+*.user
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore backup files
+*.bak
+*.backup
+*~
